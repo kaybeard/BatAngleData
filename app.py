@@ -131,7 +131,7 @@ def build_customdata(df_plot, fields):
     return df_plot[fields].to_numpy()
 
 
-def build_hovertemplate(player_col, fields):
+def build_hovertemplate(fields):
     lines = [f"<b>%{{customdata[0]}}</b>"]
     for i, field in enumerate(fields[1:], start=1):
         lines.append(f"{field}: %{{customdata[{i}]}}")
@@ -139,49 +139,162 @@ def build_hovertemplate(player_col, fields):
     return "<br>".join(lines)
 
 
-def archetype_name(row, col_ss, col_con, col_whiff, col_pull, col_gb, col_hba, col_vaa):
-    parts = []
+def describe_relative(value, p25, p40, p60, p75, high_label, avg_label, low_label):
+    if pd.isna(value):
+        return None
+    if value >= p75:
+        return high_label
+    elif value <= p25:
+        return low_label
+    else:
+        return avg_label
 
-    if col_ss and pd.notna(row.get(col_ss)):
-        if row[col_ss] >= 75:
-            parts.append("High-Speed")
-        elif row[col_ss] <= 68:
-            parts.append("Lower-Speed")
 
-    if col_con and pd.notna(row.get(col_con)):
-        if row[col_con] >= 80:
-            parts.append("Contact")
-        elif row[col_con] <= 72:
-            parts.append("Miss")
+def archetype_name_percentile(row, reference_df, cols):
+    labels = []
 
-    if col_pull and pd.notna(row.get(col_pull)):
-        if row[col_pull] >= 45:
-            parts.append("Pull")
-        elif row[col_pull] <= 35:
-            parts.append("All-Fields")
+    def get_percentiles(col):
+        if col is None or col not in reference_df.columns:
+            return None
+        s = reference_df[col].dropna()
+        if len(s) < 10:
+            return None
+        return np.percentile(s, [25, 40, 60, 75])
 
-    if col_gb and pd.notna(row.get(col_gb)):
-        if row[col_gb] >= 48:
-            parts.append("Ground-Ball")
-        elif row[col_gb] <= 38:
-            parts.append("Air-Ball")
+    if cols.get("ss"):
+        p = get_percentiles(cols["ss"])
+        if p is not None:
+            desc = describe_relative(
+                row.get(cols["ss"]), p[0], p[1], p[2], p[3],
+                "above-average bat speed",
+                "average speed",
+                "below-average bat speed"
+            )
+            if desc:
+                labels.append(desc)
 
-    if col_hba and pd.notna(row.get(col_hba)) and col_vaa and pd.notna(row.get(col_vaa)):
-        if row[col_hba] >= 20 and row[col_vaa] >= 10:
-            parts.append("Lift")
-        elif row[col_hba] <= 10 and row[col_vaa] <= 6:
-            parts.append("Flat-Plane")
+    if cols.get("con"):
+        p = get_percentiles(cols["con"])
+        if p is not None:
+            desc = describe_relative(
+                row.get(cols["con"]), p[0], p[1], p[2], p[3],
+                "strong contact",
+                "average contact",
+                "below-average contact"
+            )
+            if desc:
+                labels.append(desc)
 
-    if not parts:
-        return "Balanced"
-    return " / ".join(parts[:3])
+    if cols.get("whiff"):
+        p = get_percentiles(cols["whiff"])
+        if p is not None:
+            val = row.get(cols["whiff"])
+            if pd.notna(val):
+                if val >= p[3]:
+                    labels.append("high-miss")
+                elif val <= p[0]:
+                    labels.append("low-miss")
+
+    if cols.get("pull"):
+        p = get_percentiles(cols["pull"])
+        if p is not None:
+            desc = describe_relative(
+                row.get(cols["pull"]), p[0], p[1], p[2], p[3],
+                "pull-oriented",
+                "neutral spray",
+                "all-fields oriented"
+            )
+            if desc:
+                labels.append(desc)
+
+    if cols.get("gb"):
+        p = get_percentiles(cols["gb"])
+        if p is not None:
+            val = row.get(cols["gb"])
+            if pd.notna(val):
+                if val >= p[3]:
+                    labels.append("ground-ball oriented")
+                elif val <= p[0]:
+                    labels.append("air-ball oriented")
+
+    if cols.get("hba") and cols.get("vaa"):
+        hba_p = get_percentiles(cols["hba"])
+        vaa_p = get_percentiles(cols["vaa"])
+        hba_val = row.get(cols["hba"])
+        vaa_val = row.get(cols["vaa"])
+
+        if hba_p is not None and vaa_p is not None and pd.notna(hba_val) and pd.notna(vaa_val):
+            if hba_val >= hba_p[3] and vaa_val >= vaa_p[3]:
+                labels.append("high lift")
+            elif hba_val <= hba_p[0] and vaa_val <= vaa_p[0]:
+                labels.append("flatter plane")
+
+    damage_flags = 0
+    if cols.get("ev"):
+        p = get_percentiles(cols["ev"])
+        if p is not None and pd.notna(row.get(cols["ev"])) and row.get(cols["ev"]) >= p[3]:
+            damage_flags += 1
+    if cols.get("wh"):
+        p = get_percentiles(cols["wh"])
+        if p is not None and pd.notna(row.get(cols["wh"])) and row.get(cols["wh"]) >= p[3]:
+            damage_flags += 1
+    if cols.get("la"):
+        p = get_percentiles(cols["la"])
+        if p is not None and pd.notna(row.get(cols["la"])) and row.get(cols["la"]) >= p[3]:
+            damage_flags += 1
+
+    if damage_flags >= 2:
+        labels.append("damage-oriented")
+
+    seen = set()
+    final_labels = []
+    for lab in labels:
+        if lab not in seen:
+            final_labels.append(lab)
+            seen.add(lab)
+
+    if not final_labels:
+        return "balanced profile"
+
+    return " / ".join(final_labels[:3])
+
+
+def add_highlight_column(plot_df, col_player, highlight_player):
+    if highlight_player != "None":
+        plot_df["highlight_group"] = np.where(
+            plot_df[col_player].astype(str) == highlight_player,
+            "Highlighted",
+            "Other"
+        )
+    else:
+        plot_df["highlight_group"] = "All"
+    return plot_df
+
+
+def plot_scatter(plot_df, x, y, color_by, col_player, highlight_player, hover_fields, title):
+    plot_df = add_highlight_column(plot_df.copy(), col_player, highlight_player)
+    customdata = build_customdata(plot_df, hover_fields)
+    hovertemplate = build_hovertemplate(hover_fields)
+    symbol_arg = "highlight_group" if highlight_player != "None" else None
+
+    fig = px.scatter(
+        plot_df,
+        x=x,
+        y=y,
+        color=color_by,
+        symbol=symbol_arg,
+        hover_name=col_player,
+        title=title
+    )
+    fig.update_traces(customdata=customdata, hovertemplate=hovertemplate, marker=dict(size=10))
+    return fig
 
 
 # -----------------------------
 # UI
 # -----------------------------
 st.title("Bat Angle Explorer v3")
-st.write("Version 3: filters, hover tooltips, player highlight mode, VSA-LA view, archetypes, and comps finder.")
+st.write("Version 3: filters, hover tooltips, player highlight mode, VSA-LA view, percentile-based archetypes, and comps finder.")
 
 uploaded = st.file_uploader("Upload CSV", type=["csv"])
 if uploaded is None:
@@ -279,11 +392,16 @@ highlight_player = st.sidebar.selectbox("Highlight player on plots", ["None"] + 
 # -----------------------------
 # Archetypes / comps prep
 # -----------------------------
-cluster_features = [c for c in [col_vsa, col_vba, col_vaa, col_hfa, col_hba, col_rad, col_tilt, col_ss, col_con, col_whiff, col_pull, col_gb] if c is not None and c in df_filt.columns]
+cluster_features = [
+    c for c in [
+        col_vsa, col_vba, col_vaa, col_hfa, col_hba, col_rad, col_tilt,
+        col_ss, col_con, col_whiff, col_pull, col_gb
+    ]
+    if c is not None and c in df_filt.columns
+]
 
-df_cluster = df_filt.copy()
 if len(cluster_features) >= 3:
-    cluster_base = df_cluster[[col_player] + cluster_features].dropna().copy()
+    cluster_base = df_filt[[col_player] + cluster_features].dropna().copy()
 else:
     cluster_base = pd.DataFrame()
 
@@ -298,8 +416,21 @@ if not cluster_base.empty and len(cluster_base) >= n_clusters:
     centroids = scaler.inverse_transform(centroids_scaled)
     centroid_df = pd.DataFrame(centroids, columns=cluster_features)
 
+    archetype_cols = {
+        "ss": col_ss,
+        "con": col_con,
+        "whiff": col_whiff,
+        "pull": col_pull,
+        "gb": col_gb,
+        "hba": col_hba,
+        "vaa": col_vaa,
+        "la": col_la,
+        "ev": col_ev,
+        "wh": col_wh
+    }
+
     centroid_df["archetype_label"] = centroid_df.apply(
-        lambda row: archetype_name(row, col_ss, col_con, col_whiff, col_pull, col_gb, col_hba, col_vaa),
+        lambda row: archetype_name_percentile(row, df_filt, archetype_cols),
         axis=1
     )
 
@@ -326,7 +457,19 @@ tabs = st.tabs([
     "Archetypes", "Outliers", "Player Search", "Comps Finder", "Model", "Data"
 ])
 
-tab_overview, tab_batplane, tab_damage, tab_vsala, tab_tradeoff, tab_archetypes, tab_outliers, tab_player, tab_comps, tab_model, tab_data = tabs
+(
+    tab_overview,
+    tab_batplane,
+    tab_damage,
+    tab_vsala,
+    tab_tradeoff,
+    tab_archetypes,
+    tab_outliers,
+    tab_player,
+    tab_comps,
+    tab_model,
+    tab_data
+) = tabs
 
 # -----------------------------
 # Overview
@@ -375,16 +518,6 @@ with tab_overview:
         st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
-# Shared plot helper
-# -----------------------------
-def add_highlight_column(plot_df):
-    if highlight_player != "None":
-        plot_df["highlight_group"] = np.where(plot_df[col_player].astype(str) == highlight_player, "Highlighted", "Other")
-    else:
-        plot_df["highlight_group"] = "All"
-    return plot_df
-
-# -----------------------------
 # Bat Plane
 # -----------------------------
 with tab_batplane:
@@ -394,11 +527,10 @@ with tab_batplane:
         st.warning("Could not find HBA and/or VAA.")
     else:
         color_options = [c for c in [col_ev, col_wh, col_xslg, "archetype_label", col_la, col_ss] if c in df_filt.columns]
-        color_by = st.selectbox("Color points by", color_options, index=0)
+        color_by = st.selectbox("Color points by", color_options, index=0, key="batplane_color")
 
         keep_cols = [col_player, col_hba, col_vaa, color_by]
         plot_df = df_filt[keep_cols].dropna().copy()
-        plot_df = add_highlight_column(plot_df)
 
         if len(plot_df) < min_rows:
             st.info(f"Not enough rows after dropping NAs. Rows available: {len(plot_df)}.")
@@ -407,21 +539,16 @@ with tab_batplane:
                 plot_df,
                 [col_player, col_ev, col_la, col_vsa, col_vba, col_vaa, col_hba, col_rad, col_tilt]
             )
-            customdata = build_customdata(plot_df, hover_fields)
-            hovertemplate = build_hovertemplate(col_player, hover_fields)
-
-            symbol_arg = "highlight_group" if highlight_player != "None" else None
-
-            fig = px.scatter(
-                plot_df,
+            fig = plot_scatter(
+                plot_df=plot_df,
                 x=col_hba,
                 y=col_vaa,
-                color=color_by,
-                symbol=symbol_arg,
-                hover_name=col_player,
+                color_by=color_by,
+                col_player=col_player,
+                highlight_player=highlight_player,
+                hover_fields=hover_fields,
                 title="HBA vs VAA"
             )
-            fig.update_traces(customdata=customdata, hovertemplate=hovertemplate, marker=dict(size=10))
             st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
@@ -434,10 +561,9 @@ with tab_damage:
         st.warning("Could not find Exit Velo and/or Launch Angle.")
     else:
         color_options = [c for c in [col_wh, col_xslg, col_pull, col_gb, "archetype_label"] if c in df_filt.columns]
-        color_by = st.selectbox("Color by", color_options, index=0)
+        color_by = st.selectbox("Color by", color_options, index=0, key="damage_color")
 
         plot_df = df_filt[[col_player, col_ev, col_la, color_by]].dropna().copy()
-        plot_df = add_highlight_column(plot_df)
 
         if len(plot_df) < min_rows:
             st.info(f"Not enough rows after dropping NAs. Rows available: {len(plot_df)}.")
@@ -446,21 +572,16 @@ with tab_damage:
                 plot_df,
                 [col_player, col_ev, col_la, col_wh, col_xslg, col_pull, col_gb, col_vsa, col_vaa]
             )
-            customdata = build_customdata(plot_df, hover_fields)
-            hovertemplate = build_hovertemplate(col_player, hover_fields)
-
-            symbol_arg = "highlight_group" if highlight_player != "None" else None
-
-            fig = px.scatter(
-                plot_df,
+            fig = plot_scatter(
+                plot_df=plot_df,
                 x=col_la,
                 y=col_ev,
-                color=color_by,
-                symbol=symbol_arg,
-                hover_name=col_player,
+                color_by=color_by,
+                col_player=col_player,
+                highlight_player=highlight_player,
+                hover_fields=hover_fields,
                 title="EV vs LA"
             )
-            fig.update_traces(customdata=customdata, hovertemplate=hovertemplate, marker=dict(size=10))
             st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
@@ -477,7 +598,6 @@ with tab_vsala:
         color_by = st.selectbox("Color by", color_options, index=0, key="vsa_la_color")
 
         plot_df = df_filt[[col_player, col_vsa, col_la, color_by]].dropna().copy()
-        plot_df = add_highlight_column(plot_df)
 
         if len(plot_df) < min_rows:
             st.info(f"Not enough rows after dropping NAs. Rows available: {len(plot_df)}.")
@@ -486,21 +606,16 @@ with tab_vsala:
                 plot_df,
                 [col_player, col_vsa, col_la, col_ev, col_wh, col_vaa, col_hba, col_tilt]
             )
-            customdata = build_customdata(plot_df, hover_fields)
-            hovertemplate = build_hovertemplate(col_player, hover_fields)
-
-            symbol_arg = "highlight_group" if highlight_player != "None" else None
-
-            fig = px.scatter(
-                plot_df,
+            fig = plot_scatter(
+                plot_df=plot_df,
                 x=col_vsa,
                 y=col_la,
-                color=color_by,
-                symbol=symbol_arg,
-                hover_name=col_player,
+                color_by=color_by,
+                col_player=col_player,
+                highlight_player=highlight_player,
+                hover_fields=hover_fields,
                 title="VSA vs Launch Angle"
             )
-            fig.update_traces(customdata=customdata, hovertemplate=hovertemplate, marker=dict(size=10))
             st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
@@ -516,12 +631,11 @@ with tab_tradeoff:
         if not y_options:
             st.warning("No tradeoff outcome columns detected.")
         else:
-            ycol = st.selectbox("Choose Y variable", y_options, index=0)
+            ycol = st.selectbox("Choose Y variable", y_options, index=0, key="tradeoff_y")
             color_options = [c for c in [col_ev, col_wh, col_xslg, col_la, "archetype_label"] if c in df_filt.columns]
             color_by = st.selectbox("Color by", color_options, index=0, key="tradeoff_color")
 
             plot_df = df_filt[[col_player, col_ss, ycol, color_by]].dropna().copy()
-            plot_df = add_highlight_column(plot_df)
 
             if len(plot_df) < min_rows:
                 st.info(f"Not enough rows after dropping NAs. Rows available: {len(plot_df)}.")
@@ -530,21 +644,16 @@ with tab_tradeoff:
                     plot_df,
                     [col_player, col_ss, ycol, col_ev, col_wh, col_con, col_whiff, col_vsa, col_hba]
                 )
-                customdata = build_customdata(plot_df, hover_fields)
-                hovertemplate = build_hovertemplate(col_player, hover_fields)
-
-                symbol_arg = "highlight_group" if highlight_player != "None" else None
-
-                fig = px.scatter(
-                    plot_df,
+                fig = plot_scatter(
+                    plot_df=plot_df,
                     x=col_ss,
                     y=ycol,
-                    color=color_by,
-                    symbol=symbol_arg,
-                    hover_name=col_player,
+                    color_by=color_by,
+                    col_player=col_player,
+                    highlight_player=highlight_player,
+                    hover_fields=hover_fields,
                     title=f"{ycol} vs {col_ss}"
                 )
-                fig.update_traces(customdata=customdata, hovertemplate=hovertemplate, marker=dict(size=10))
                 st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
@@ -559,12 +668,19 @@ with tab_archetypes:
         st.write("Cluster features used:")
         st.write(cluster_features)
 
+        display_cols = [col_player, "cluster_id", "archetype_label"] + cluster_features
+        display_cols = [c for c in display_cols if c in cluster_base.columns]
         st.dataframe(
-            cluster_base[[col_player, "cluster_id", "archetype_label"] + cluster_features].sort_values(["cluster_id", col_player]),
+            cluster_base[display_cols].sort_values(["cluster_id", col_player]),
             use_container_width=True
         )
 
-        archetype_summary = df_filt.groupby("archetype_label", dropna=True).size().reset_index(name="count").sort_values("count", ascending=False)
+        archetype_summary = (
+            df_filt.groupby("archetype_label", dropna=True)
+            .size()
+            .reset_index(name="count")
+            .sort_values("count", ascending=False)
+        )
         st.plotly_chart(
             px.bar(archetype_summary, x="archetype_label", y="count", title="Players by Archetype"),
             use_container_width=True
@@ -572,27 +688,20 @@ with tab_archetypes:
 
         if col_hba and col_vaa:
             plot_df = df_filt[[col_player, col_hba, col_vaa, "archetype_label"]].dropna().copy()
-            plot_df = add_highlight_column(plot_df)
-
             hover_fields = make_hover_fields(
                 plot_df,
                 [col_player, "archetype_label", col_vsa, col_vba, col_vaa, col_hba, col_ss, col_con]
             )
-            customdata = build_customdata(plot_df, hover_fields)
-            hovertemplate = build_hovertemplate(col_player, hover_fields)
-
-            symbol_arg = "highlight_group" if highlight_player != "None" else None
-
-            fig = px.scatter(
-                plot_df,
+            fig = plot_scatter(
+                plot_df=plot_df,
                 x=col_hba,
                 y=col_vaa,
-                color="archetype_label",
-                symbol=symbol_arg,
-                hover_name=col_player,
+                color_by="archetype_label",
+                col_player=col_player,
+                highlight_player=highlight_player,
+                hover_fields=hover_fields,
                 title="Archetypes on Bat Plane Map"
             )
-            fig.update_traces(customdata=customdata, hovertemplate=hovertemplate, marker=dict(size=10))
             st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------
@@ -601,10 +710,13 @@ with tab_archetypes:
 with tab_outliers:
     st.subheader("Outliers")
 
-    metric_candidates = [c for c in [
-        col_vsa, col_vba, col_vaa, col_hfa, col_hba, col_rad, col_tilt,
-        col_ss, col_ev, col_la, col_wh, col_con, col_whiff, col_pull, col_gb, col_xslg
-    ] if c is not None and c in df_filt.columns]
+    metric_candidates = [
+        c for c in [
+            col_vsa, col_vba, col_vaa, col_hfa, col_hba, col_rad, col_tilt,
+            col_ss, col_ev, col_la, col_wh, col_con, col_whiff, col_pull, col_gb, col_xslg
+        ]
+        if c is not None and c in df_filt.columns
+    ]
 
     chosen = st.multiselect("Metrics to scan", metric_candidates, default=metric_candidates[:min(8, len(metric_candidates))])
 
@@ -649,10 +761,13 @@ with tab_player:
         idx = row_idx[0]
         st.markdown(f"### {selected}")
 
-        card_metrics = [c for c in [
-            col_vsa, col_vba, col_vaa, col_hfa, col_hba, col_rad, col_tilt,
-            col_ss, col_ev, col_la, col_wh, col_con, col_whiff, col_pull, col_gb, col_xslg
-        ] if c is not None and c in df_filt.columns]
+        card_metrics = [
+            c for c in [
+                col_vsa, col_vba, col_vaa, col_hfa, col_hba, col_rad, col_tilt,
+                col_ss, col_ev, col_la, col_wh, col_con, col_whiff, col_pull, col_gb, col_xslg
+            ]
+            if c is not None and c in df_filt.columns
+        ]
 
         rows = []
         for m in card_metrics:
@@ -682,9 +797,15 @@ with tab_player:
 # -----------------------------
 with tab_comps:
     st.subheader("Comps Finder")
-    st.caption("Closest hitters by swing/shape profile using standardized distance.")
+    st.caption("Closest hitters by swing/profile shape using standardized distance.")
 
-    comp_features = [c for c in [col_vsa, col_vba, col_vaa, col_hfa, col_hba, col_rad, col_tilt, col_ss, col_con, col_whiff, col_pull, col_gb] if c is not None and c in df_filt.columns]
+    comp_features = [
+        c for c in [
+            col_vsa, col_vba, col_vaa, col_hfa, col_hba, col_rad, col_tilt,
+            col_ss, col_con, col_whiff, col_pull, col_gb
+        ]
+        if c is not None and c in df_filt.columns
+    ]
 
     if len(comp_features) < 3:
         st.warning("Not enough comparable numeric swing columns for comps.")
@@ -742,8 +863,14 @@ with tab_model:
                 c2.metric("R²", f"{r2_score(y, pred):.3f}")
                 c3.metric("MAE", f"{mean_absolute_error(y, pred):.4f}")
 
-                st.plotly_chart(px.scatter(x=pred, y=y, labels={"x": "Predicted", "y": "Actual"}, title="Actual vs Predicted"), use_container_width=True)
-                st.plotly_chart(px.scatter(x=pred, y=resid, labels={"x": "Predicted", "y": "Residual"}, title="Residuals vs Predicted"), use_container_width=True)
+                st.plotly_chart(
+                    px.scatter(x=pred, y=y, labels={"x": "Predicted", "y": "Actual"}, title="Actual vs Predicted"),
+                    use_container_width=True
+                )
+                st.plotly_chart(
+                    px.scatter(x=pred, y=resid, labels={"x": "Predicted", "y": "Residual"}, title="Residuals vs Predicted"),
+                    use_container_width=True
+                )
             else:
                 st.info("Not enough rows after filtering for the model.")
         else:
